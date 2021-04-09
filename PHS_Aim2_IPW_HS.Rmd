@@ -1,0 +1,640 @@
+---
+title: "Pathways Heart Study Aim 2 IPW Analysis"
+author: "Hanjie Shen"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+require(tidyverse)
+require(haven)
+require(ggplot2)
+require(dplyr)
+require(plyr)
+require(naniar)
+require(reshape2)
+require(survival)
+require(survminer)
+require(cmprsk)
+require(pec)
+require(LtAtStructuR)
+require(stremr)
+require(magrittr)
+require(grDevices)
+require(data.table)
+require(knitr)
+
+setwd("/Users/hshen2/Desktop/Pathways Heart Study/Aim 2 Results")
+
+dat_ihd_anthra = read.csv("dat_ihd_anthra.csv")
+dat_hf_cm_anthra = read.csv("dat_hf_cm_anthra.csv")
+dat_stroke_anthra = read.csv("dat_stroke_anthra.csv")
+dat_ihd_tras = read.csv("dat_ihd_tras.csv")
+dat_hf_cm_tras = read.csv("dat_hf_cm_tras.csv")
+dat_stroke_tras = read.csv("dat_stroke_tras.csv")
+dat_ihd_taxane = read.csv("dat_ihd_taxane.csv")
+dat_hf_cm_taxane = read.csv("dat_hf_cm_taxane.csv")
+dat_stroke_taxane = read.csv("dat_stroke_taxane.csv")
+
+dat_ihd_anthra = data.table(dat_ihd_anthra[,-1])
+dat_hf_cm_anthra = data.table(dat_hf_cm_anthra[,-1])
+dat_stroke_anthra = data.table(dat_stroke_anthra[,-1])
+dat_ihd_tras = data.table(dat_ihd_tras[,-1])
+dat_hf_cm_tras = data.table(dat_hf_cm_tras[,-1])
+dat_stroke_tras = data.table(dat_stroke_tras[,-1])
+dat_ihd_taxane = data.table(dat_ihd_taxane[,-1])
+dat_hf_cm_taxane = data.table(dat_hf_cm_taxane[,-1])
+dat_stroke_taxane = data.table(dat_stroke_taxane[,-1])
+
+covar_chemo = c("ajcc_stage", "diab_bl", "htn_bl", "dyslipid_bl", "bmicat1", 
+                "smok", "charlson", "edu_cat", "income_cat",
+                "agegrp", "race", "horm_yn","rad_tx_yn", "menop")
+```
+
+# Chemotherapy
+## Anthracycline
+```{r, message=FALSE, warning=FALSE}
+# Ischemic Heart Disease
+dat_ihd_anthra$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_ihd_anthra$ID)
+for (i in 1:length(id_uni)){
+  dat_ihd_anthra$Y.tplus1[dat_ihd_anthra$ID == id_uni[i]] = 
+    shift(dat_ihd_anthra$outcome[dat_ihd_anthra$ID == id_uni[i]], 1)
+}
+
+dat_ihd_anthra[, ("exposure.set1") := 1L]
+dat_ihd_anthra[, ("exposure.set0") := 0L]
+
+OData = importData(dat_ihd_anthra, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Ischemic Heart Disease",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+
+# Heart Failure/Cardiomyopathy
+dat_hf_cm_anthra$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_hf_cm_anthra$ID)
+for (i in 1:length(id_uni)){
+  dat_hf_cm_anthra$Y.tplus1[dat_hf_cm_anthra$ID == id_uni[i]] = 
+    shift(dat_hf_cm_anthra$outcome[dat_hf_cm_anthra$ID == id_uni[i]], 1)
+}
+
+dat_hf_cm_anthra[, ("exposure.set1") := 1L]
+dat_hf_cm_anthra[, ("exposure.set0") := 0L]
+
+OData = importData(dat_hf_cm_anthra, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Heart Failure/Cardiomyopathy",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+
+# Stroke
+dat_stroke_anthra$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_stroke_anthra$ID)
+for (i in 1:length(id_uni)){
+  dat_stroke_anthra$Y.tplus1[dat_stroke_anthra$ID == id_uni[i]] = 
+    shift(dat_stroke_anthra$outcome[dat_stroke_anthra$ID == id_uni[i]], 1)
+}
+
+dat_stroke_anthra[, ("exposure.set1") := 1L]
+dat_stroke_anthra[, ("exposure.set0") := 0L]
+
+OData = importData(dat_stroke_anthra, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Stroke",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+```
+
+## Trastuzumab
+```{r, message=FALSE, warning=FALSE}
+# Ischemic Heart Disease
+dat_ihd_tras$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_ihd_tras$ID)
+for (i in 1:length(id_uni)){
+  dat_ihd_tras$Y.tplus1[dat_ihd_tras$ID == id_uni[i]] = 
+    shift(dat_ihd_tras$outcome[dat_ihd_tras$ID == id_uni[i]], 1)
+}
+
+dat_ihd_tras[, ("exposure.set1") := 1L]
+dat_ihd_tras[, ("exposure.set0") := 0L]
+
+OData = importData(dat_ihd_tras, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Ischemic Heart Disease",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+
+# Heart Failure/Cardiomyopathy
+dat_hf_cm_tras$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_hf_cm_tras$ID)
+for (i in 1:length(id_uni)){
+  dat_hf_cm_tras$Y.tplus1[dat_hf_cm_tras$ID == id_uni[i]] = 
+    shift(dat_hf_cm_tras$outcome[dat_hf_cm_tras$ID == id_uni[i]], 1)
+}
+
+dat_hf_cm_tras[, ("exposure.set1") := 1L]
+dat_hf_cm_tras[, ("exposure.set0") := 0L]
+
+OData = importData(dat_hf_cm_tras, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Heart Failure/Cardiomyopathy",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+
+# Stroke
+dat_stroke_tras$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_stroke_tras$ID)
+for (i in 1:length(id_uni)){
+  dat_stroke_tras$Y.tplus1[dat_stroke_tras$ID == id_uni[i]] = 
+    shift(dat_stroke_tras$outcome[dat_stroke_tras$ID == id_uni[i]], 1)
+}
+
+dat_stroke_tras[, ("exposure.set1") := 1L]
+dat_stroke_tras[, ("exposure.set0") := 0L]
+
+OData = importData(dat_stroke_tras, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Stroke",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+
+```
+
+
+## Taxane
+```{r, message=FALSE, warning=FALSE}
+# Ischemic Heart Disease
+dat_ihd_taxane$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_ihd_taxane$ID)
+for (i in 1:length(id_uni)){
+  dat_ihd_taxane$Y.tplus1[dat_ihd_taxane$ID == id_uni[i]] = 
+    shift(dat_ihd_taxane$outcome[dat_ihd_taxane$ID == id_uni[i]], 1)
+}
+
+dat_ihd_taxane[, ("exposure.set1") := 1L]
+dat_ihd_taxane[, ("exposure.set0") := 0L]
+
+OData = importData(dat_ihd_taxane, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Ischemic Heart Disease",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+
+# Heart Failure/Cardiomyopathy
+dat_hf_cm_taxane$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_hf_cm_taxane$ID)
+for (i in 1:length(id_uni)){
+  dat_hf_cm_taxane$Y.tplus1[dat_hf_cm_taxane$ID == id_uni[i]] = 
+    shift(dat_hf_cm_taxane$outcome[dat_hf_cm_taxane$ID == id_uni[i]], 1)
+}
+
+dat_hf_cm_taxane[, ("exposure.set1") := 1L]
+dat_hf_cm_taxane[, ("exposure.set0") := 0L]
+
+OData = importData(dat_hf_cm_taxane, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Heart Failure/Cardiomyopathy",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+
+# Stroke
+dat_stroke_taxane$Y.tplus1 = NULL
+
+shift = function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+id_uni = unique(dat_stroke_taxane$ID)
+for (i in 1:length(id_uni)){
+  dat_stroke_taxane$Y.tplus1[dat_stroke_taxane$ID == id_uni[i]] = 
+    shift(dat_stroke_taxane$outcome[dat_stroke_taxane$ID == id_uni[i]], 1)
+}
+
+dat_stroke_taxane[, ("exposure.set1") := 1L]
+dat_stroke_taxane[, ("exposure.set0") := 0L]
+
+OData = importData(dat_stroke_taxane, ID = "ID", t = "intnum", covars = covar_chemo, 
+                   CENS = "censor", TRT = "exposure", OUTCOME = "Y.tplus1")
+
+get_data(OData)[, ("exposure.set1") := 1L]
+get_data(OData)[, ("exposure.set0") := 0L]
+
+gform_CENS = "censor ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+gform_TRT = "exposure ~ I.agegrp +  I.ajcc_stage + I.race + I.bmicat1 + I.smok + I.charlson + 
+I.diab_bl + I.dyslipid_bl + I.htn_bl + I.edu_cat + I.income_cat + I.menop + I.horm_yn + I.rad_tx_yn"
+stratify_CENS = list(censor=c("intnum < 13", "intnum == 13"))
+
+OData = fitPropensity(OData,
+                      gform_CENS = gform_CENS,
+                      gform_TRT = gform_TRT,
+                      stratify_CENS = stratify_CENS)
+
+AKME.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  survNPMSM(OData) %$%
+  estimates
+
+
+head(AKME.St.1[])
+
+IPW.St.1 = getIPWeights(OData, intervened_TRT = "exposure.set1") %>%
+  directIPW(OData) %$%
+  estimates
+
+head(IPW.St.1[])
+
+wts.DT.1 = getIPWeights(OData = OData, intervened_TRT = "exposure.set1", rule_name = "exposure1")
+wts.DT.0 = getIPWeights(OData = OData, intervened_TRT = "exposure.set0", rule_name = "exposure0")
+survMSM_res = survMSM(list(wts.DT.1, wts.DT.0), OData, tbreaks = c(1:12),
+                      est_name = "IPAW", getSEs = TRUE)
+
+
+n  = dim(survMSM_res$exposure0$estimates)[1]
+tab = matrix(NA, n, 3)
+rownames(tab) = c("Stroke",rep("",n-1))
+colnames(tab) = c("Time","HR (Not Received Treatment)","HR (Received Treatment)")
+tab[,1] = c(0:(n-1))
+tab[,2] = survMSM_res$exposure0$ht
+tab[,3] = survMSM_res$exposure1$ht
+
+kable(tab)
+
+
+```
