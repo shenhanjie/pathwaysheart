@@ -1,0 +1,397 @@
+---
+title: "Pathways Heart Study Aim 2 IPW Analysis"
+author: "Hanjie Shen"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# The original Pathways cohort includes 4505 participants. For this project, we restricted women to be enrolled for 12 months prior to their diagnosis date. There is no such restriction for the participants in the original Pathways cohort, therefore, when we applied the enrollment restriction, we ended up selecting 4181 women from the original Pathways cohort.
+
+```{r, message=FALSE, warning=FALSE}
+require(tidyverse)
+require(haven)
+require(ggplot2)
+require(dplyr)
+require(plyr)
+require(naniar)
+require(reshape2)
+require(survival)
+require(survminer)
+require(cmprsk)
+require(pec)
+require(LtAtStructuR)
+require(stremr)
+require(magrittr)
+require(grDevices)
+require(data.table)
+require(knitr)
+
+# Load data
+setwd("~/Desktop/Pathways Heart Study/Data/full data")
+# setwd("C:/Users/shenh/Desktop/Pathways Heart Study/Data/full data")
+
+# cases data
+cases = as.data.frame(read_sas('cases.sas7bdat'))
+cases_rad = as.data.frame(read_sas('aim1_cases_rad_tx_02mar2020.sas7bdat'))
+cases$rad_tx_yn = cases_rad$rad_tx_yn[match(cases_rad$CVD_studyid,cases$CVD_studyid)]
+cases$laterality_tx = cases_rad$LATERALITY[match(cases_rad$CVD_studyid,cases$CVD_studyid)]
+cases$rad_tx_start_dt = cases_rad$rad_tx_start_dt[match(cases_rad$CVD_studyid,cases$CVD_studyid)]
+cases = cases[,!names(cases) %in% c("rad_yn","rad_date","laterality")]
+
+# risk factor data 
+bmi = as.data.frame(read_sas('baseline_bmi.sas7bdat'))
+bp = as.data.frame(read_sas('baseline_bp.sas7bdat'))
+lipid = as.data.frame(read_sas('dyslipidemia.sas7bdat'))
+diab = as.data.frame(read_sas('diabetes.sas7bdat'))
+smok = as.data.frame(read_sas('smoking.sas7bdat'))
+hyper = as.data.frame(read_sas('phase_hypertension.sas7bdat'))
+
+# income and education data
+educ_income = as.data.frame(read_sas('pw_educ_income.sas7bdat'))
+
+# menopause and census data 
+menop = as.data.frame(read_sas('menopause.sas7bdat'))
+census = as.data.frame(read_sas('census.sas7bdat'))
+
+# cardiotox
+pw_cardiotox = as.data.frame(read_sas('pw_cardiotox.sas7bdat'))
+
+# anthra
+pw_anthra = as.data.frame(read_sas('pw_anthra_bdcomp_14jan21.sas7bdat'))
+
+# censoring events 
+censor = as.data.frame(read_sas('censoring.sas7bdat'))
+censor_phs = as.data.frame(read_sas('censoring_pathways.sas7bdat'))
+
+
+# chemotherapy data
+chemo = as.data.frame(read_sas('aim2_chemo_data_08apr2020.sas7bdat'))
+chemo_drug = as.data.frame(read_sas('aim2_chemo_drug_ind_add_11dec20.sas7bdat'))
+
+
+# hormonal data
+horm = as.data.frame(read_sas('aim2_horm_rx_08may2020.sas7bdat'))
+names(horm) = tolower(names(horm))
+
+# EF dataset
+ef = as.data.frame(read_sas('aim2_ef.sas7bdat'))
+
+# Charlson dataset
+charlson = as.data.frame(read_sas('kwan_num0090_01jun20.sas7bdat'))
+
+# CVD outcome data 
+cvd = as.data.frame(read_sas('cvd_events.sas7bdat'))
+
+# clean CVD data
+names(cvd) = tolower(names(cvd))
+# recode cvd group
+cvd$cvd_group[cvd$cvd_condition=='Heart Failure'] = 'Heart Failure'
+cvd$cvd_group[cvd$cvd_condition=='Cardiomyopathy'] = 'Cardiomyopathy'
+cvd$cvd_group[cvd$cvd_condition=='Transient Ischemic Attack (TIA)'] = 'TIA'
+cvd$cvd_group[cvd$cvd_condition %in% c('Acute Ischemic stroke',
+                                       'Acute myocardial infarction',
+                                       'Intracerebral hemorrhage',
+                                       'Other cerebrovascular disease',
+                                       'Retinal vascular occlusion',
+                                       'Subarachnoid hemorrhage')] = 'Stroke'
+
+#### define true incidence and prevalence
+cvd2 = suppressWarnings(reshape2::dcast(data=cvd, cvd_studyid ~ cvd_group,
+             value.var = 'daysto_cvd_event', min, na.rm=T))
+
+cvd2[,-1] = lapply(cvd2[,-1], function(x) {
+  x[x==Inf] = NA
+  x
+})
+
+names(cvd2) = gsub('/| ','_',names(cvd2))
+cvd_grp = paste0(names(cvd2)[-1],'_grp')
+names(cvd2)[-1] = paste0(cvd_grp,'_dt')
+
+cvd2[,cvd_grp] = lapply(cvd2[,-1], function(x) {
+  y = ifelse(!is.na(x),1,0)
+  y[y==1 & x>0] = 2
+  y = factor(y, levels=0:2, labels = c('No','Prevalent','Incident'))
+  y
+})
+
+cvd2list = lapply(cvd_grp, function(x){
+  dates = eval(parse(text=paste0("dcast(data=cvd2, cvd_studyid~",x,", value.var = '",x,"_dt')")))
+  prev = ifelse(cvd2[,x]=='Prevalent',1,0)
+  inc = ifelse(cvd2[,x]=='Incident',1,0)
+  sum = data.frame(cbind(prev,inc,dates))
+  sum = sum[,c('cvd_studyid','prev','inc','Incident')]
+  names(sum) = c('cvd_studyid',paste0(x,c('_prev','_inc','_incdt')))
+  sum
+})
+
+
+cvd2list[[12]] = cvd2
+cvd2_final = Reduce(function(...) merge(...,by='cvd_studyid', all.x=T), cvd2list)
+
+
+#### define true incidence and prevalence
+cvd3 = suppressWarnings(reshape2::dcast(data=cvd, cvd_studyid~cvd_condition, 
+             value.var = 'daysto_cvd_event', min,na.rm=T))
+
+
+names(cvd3) = gsub('/| ','_',names(cvd3))
+names(cvd3) = gsub('&_|\\(|\\)','',names(cvd3))
+names(cvd3)[17] = "Percutaneous_coronary_intervention_PCI"
+
+cvd3[,-1] = lapply(cvd3[,-1], function(x) {
+  x[x==Inf] = NA
+  x
+})
+
+cvd_cond = names(cvd3)[-1]
+names(cvd3)[-1] = paste0(names(cvd3)[-1],'_dt')
+cvd3[,cvd_cond] = lapply(cvd3[,-1],  function(x) {
+  y = ifelse(!is.na(x),1,0)
+  y[y==1 & x>0] = 2
+  y = factor(y, levels=0:2, labels = c('No','Prevalent','Incident'))
+  y
+})
+
+cvd3list = lapply(cvd_cond, function(x){
+  dates = eval(parse(text=paste0("dcast(data=cvd3, cvd_studyid~",x,", value.var = '",x,"_dt')")))
+  prev = ifelse(cvd3[,x]=='Prevalent',1,0)
+  inc = ifelse(cvd3[,x]=='Incident',1,0)
+  sum = data.frame(cbind(prev,inc,dates))
+  sum = sum[,c('cvd_studyid','prev','inc','Incident')]
+  names(sum) = c('cvd_studyid',paste0(x,c('_prev','_inc','_incdt')))
+  sum
+})
+
+cvd3list[[23]] = cvd3
+cvd3_final = Reduce(function(...) merge(...,by='cvd_studyid', all.x=T), cvd3list)
+
+names(cvd2_final)
+names(cvd3_final)
+
+
+## list all datasets
+datalist = list(chemo[,c(-5,-6,-12,-13,-14)],
+                 cases[,-1],
+                 bmi[,c("CVD_studyid","BMI","BMI_Category_II","daysto_bmi")],
+                 bp[,c("CVD_studyid","systolic","diastolic","daysto_bp","hypertension")],
+                 diab[,c(6,7,1)],lipid[,c(4,5,2)], hyper[,c(6,2,7)],
+                 smok[,c(5,2)],menop[,c(1,3)],
+                 census[,c(4,5,6,7,8,9,10,11,12,13,14,15,16,2)],
+                 cvd2_final,
+                 cvd3_final,
+                 censor[,c(1,9,10,11,12,13)],
+                 censor_phs,
+                 chemo_drug,
+                 pw_anthra[,-4])
+
+## make all var names lower case
+datalist = lapply(datalist,function(x){
+  names(x) = tolower(names(x))
+  x
+})
+
+## merge all data by cvd_studyid
+phs.aim2.data = Reduce(function(...) merge(...,by='cvd_studyid', all.x=T), datalist)
+
+phs.aim2.data$cvd_condition = cvd$cvd_condition[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$cvd_group = cvd$cvd_group[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$daysto_cvd_event = cvd$daysto_cvd_event[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+
+phs.aim2.data$daysto_cvd_dt = phs.aim2.data$index_date + phs.aim2.data$daysto_cvd_event
+
+
+# format and create new variables
+# age groups
+phs.aim2.data$agegrp = cut(phs.aim2.data$dxage, c(0, 40, 50, 60, 70, 101), right=F,
+                           labels = c('<40 yo','40-49','50-59','60-69','70+ yo'))
+
+# race
+phs.aim2.data$race = factor(phs.aim2.data$raceethn1, 
+                            labels=c("WHITE","BLACK","ASIAN","HISPANIC","PI","AI-AN"))
+
+# postive nodes
+phs.aim2.data$nodal = factor(phs.aim2.data$nodal, labels = c('Positive','Negative'))
+
+# tumor markers
+phs.aim2.data[,c('er','pr','her2')] = lapply(phs.aim2.data[,c('er','pr','her2')], function(x)
+  factor(x, levels = c(0,1,2,3,8,9),
+         labels = c('Not done','Positive','Negative',
+                    'Borderline','Ordered, N/A',
+                    'Unknown')))
+
+# erpr status
+phs.aim2.data$erpr = factor(phs.aim2.data$erpr, labels = c('ER+/PR+','ER+/PR-','ER-/PR+','ER-/PR-',
+                                                           'UNKNOWN'))
+
+# more tumor markers and treatment received
+phs.aim2.data[,c('tri_neg','chemo_yn','rad_tx_yn','horm_yn')] = 
+  lapply(phs.aim2.data[,c('tri_neg','chemo_yn','rad_tx_yn','horm_yn')], function(x)
+    factor(x, levels = c(0,1,9),
+           labels = c('No','Yes','Other')))
+
+# AJCC stage
+phs.aim2.data$ajcc_stage = factor(phs.aim2.data$ajcc_stage,
+                                  labels = c('Stage I','Stage II', 'Stage III','Stage IV'))
+
+
+# BMI category
+phs.aim2.data$bmi1 = as.numeric(gsub('[<|>|=]','',phs.aim2.data$bmi))
+phs.aim2.data$bmicat = cut(phs.aim2.data$bmi1, c(0,18.5,25,30,35,Inf),right=F,
+                           labels = c('Underweight','Normal','Overweight','Obese I','Obese II+'))
+phs.aim2.data$bmicat = as.character(phs.aim2.data$bmicat)
+phs.aim2.data$bmicat[phs.aim2.data$raceethn1=='ASIAN' & (phs.aim2.data$bmi1 >= 23 & phs.aim2.data$bmi1 < 27.5)] = 'Overweight'
+phs.aim2.data$bmicat[phs.aim2.data$raceethn1=='ASIAN' & (phs.aim2.data$bmi1 >= 27.5 & phs.aim2.data$bmi1 < 35)] = 'Obese I'
+phs.aim2.data$bmicat[is.na(phs.aim2.data$bmicat)] = 'Unknown'
+phs.aim2.data$bmicat = factor(phs.aim2.data$bmicat,
+                              levels = c('Underweight','Normal','Overweight','Obese I','Obese II+','Unknown'))
+
+# smoking status
+phs.aim2.data$smok = phs.aim2.data$smoke_status_6m
+phs.aim2.data$smok[phs.aim2.data$smok %in% c('Q')] = 'Quited'
+phs.aim2.data$smok[phs.aim2.data$smok %in% c('Y')] = 'Current smoker'
+phs.aim2.data$smok[phs.aim2.data$smok %in% c('N')] = 'Never smoker'
+phs.aim2.data$smok[(phs.aim2.data$smok %in% c(''))|is.na(phs.aim2.data$smok)] = 'Unknown'
+
+phs.aim2.data$smok = factor(phs.aim2.data$smok, levels=c('Never smoker','Current smoker','Quited','Unknown'))
+
+# menopausal status
+phs.aim2.data$menop = factor(phs.aim2.data$bl_meno_status)
+phs.aim2.data$menop[is.na(phs.aim2.data$menop) & phs.aim2.data$age > 51] = '1'
+phs.aim2.data$menop[is.na(phs.aim2.data$menop) & phs.aim2.data$age <= 51] = '0'
+
+# baseline diabetes                                                 
+phs.aim2.data$diab_bl = ifelse(phs.aim2.data$daysto_diabetes<=0, 1, 0)
+phs.aim2.data$diab_bl[is.na(phs.aim2.data$diab_bl)] = 0
+phs.aim2.data$diab_bl = factor(phs.aim2.data$diab_bl,levels=c(1,0),labels = c('Yes','No'))
+
+# baseline dyslipidemia
+phs.aim2.data$dyslipid_bl = ifelse(phs.aim2.data$daysto_dyslipidemia<=0, 1, 0)
+phs.aim2.data$dyslipid_bl[is.na(phs.aim2.data$dyslipid_bl)] = 0
+phs.aim2.data$dyslipid_bl = factor(phs.aim2.data$dyslipid_bl,levels=c(1,0),labels = c('Yes','No'))
+
+# baseline hypertension
+phs.aim2.data$htn_bl = ifelse(phs.aim2.data$daysto_phase_htn<=0, 1, 0)
+phs.aim2.data$htn_bl[is.na(phs.aim2.data$htn_bl)] = 0
+phs.aim2.data$htn_bl = factor(phs.aim2.data$htn_bl,levels=c(1,0),labels = c('Yes','No'))
+
+# education
+phs.aim2.data$edu_cat = educ_income$BL_EDUCLVL_5CAT[match(phs.aim2.data$cvd_studyid,educ_income$CVD_studyid)]
+phs.aim2.data$edu_cat = as.factor(phs.aim2.data$edu_cat)
+
+# income
+phs.aim2.data$income_cat = educ_income$BL_INC_CAT2[match(phs.aim2.data$cvd_studyid,educ_income$CVD_studyid)]
+phs.aim2.data$income_cat = as.factor(phs.aim2.data$income_cat)
+
+
+
+### Define CVD outcomes
+## set all NA for cvd outcomes as 0
+phs.aim2.data[,tolower(c(cvd_grp,cvd_cond))] = lapply(phs.aim2.data[,tolower(c(cvd_grp,cvd_cond))], function(x) {
+  x[is.na(x)] = 'No'
+  x
+})
+
+phs.aim2.data[,grep('inc$|prev$|rec$',names(phs.aim2.data))] = 
+  lapply(phs.aim2.data[,grep('inc$|prev$|rec$',names(phs.aim2.data))], function(x) {
+    x[is.na(x)] = 0
+    x
+  })
+
+
+phs.aim2.data$heart_failure_cardiomyopathy_grp_prev = ifelse(phs.aim2.data$cardiomyopathy_grp_prev==1|
+                                           phs.aim2.data$heart_failure_grp_prev==1, 1, 0)
+
+phs.aim2.data$heart_failure_cardiomyopathy_grp_inc =  ifelse(phs.aim2.data$cardiomyopathy_grp_inc==1|
+                                                               phs.aim2.data$heart_failure_grp_inc==1, 1, 0)
+
+phs.aim2.data$heart_failure_cardiomyopathy_grp_incdt = apply(phs.aim2.data[,c("cardiomyopathy_grp_incdt",
+                                                          "heart_failure_grp_incdt")],1,min,na.rm=T)
+
+
+# define censoring time
+phs.aim2.data$censor_dt = apply(phs.aim2.data[,c("daysto_death","daysto_enr_end","daysto_end_study")],1,min,na.rm=T)
+
+
+# calculate time of follow up
+phs.aim2.data$ischemic_heart_disease_grp_inc_fu = phs.aim2.data$ischemic_heart_disease_grp_incdt
+phs.aim2.data$ischemic_heart_disease_grp_inc_fu[which(phs.aim2.data$ischemic_heart_disease_grp_inc==0)] = 
+  phs.aim2.data$censor_dt[which(phs.aim2.data$ischemic_heart_disease_grp_inc==0)] 
+
+phs.aim2.data$stroke_grp_inc_fu = phs.aim2.data$stroke_grp_incdt
+phs.aim2.data$stroke_grp_inc_fu[which(phs.aim2.data$stroke_grp_inc==0)] = 
+  phs.aim2.data$censor_dt[which(phs.aim2.data$stroke_grp_inc==0)]
+
+phs.aim2.data$cardiomyopathy_grp_inc_fu = phs.aim2.data$cardiomyopathy_grp_incdt
+phs.aim2.data$cardiomyopathy_grp_inc_fu[which(phs.aim2.data$cardiomyopathy_grp_inc==0)] = 
+  phs.aim2.data$censor_dt[which(phs.aim2.data$cardiomyopathy_grp_inc==0)] 
+
+phs.aim2.data$heart_failure_grp_inc_fu = phs.aim2.data$heart_failure_grp_incdt
+phs.aim2.data$heart_failure_grp_inc_fu[which(phs.aim2.data$heart_failure_grp_inc==0)] = 
+  phs.aim2.data$censor_dt[which(phs.aim2.data$heart_failure_grp_inc==0)] 
+
+phs.aim2.data$heart_failure_cardiomyopathy_grp_inc_fu = phs.aim2.data$heart_failure_cardiomyopathy_grp_incdt
+phs.aim2.data$heart_failure_cardiomyopathy_grp_inc_fu[which(phs.aim2.data$heart_failure_cardiomyopathy_grp_inc==0)] = 
+  phs.aim2.data$censor_dt[which(phs.aim2.data$heart_failure_cardiomyopathy_grp_inc==0)] 
+
+
+```
+
+# Define eofdate and eoftype
+## EOF_date (date of end of follow-up): earliest time among date of death, end of study date, CVD events date, or end of enrollment date.
+## EOF_type (reason for end of follow-up): 
+
+```{r, message=FALSE, warning=FALSE}
+phs.aim2.data$death_date = as.Date(phs.aim2.data$death_date)
+phs.aim2.data$end_of_study = as.Date(phs.aim2.data$end_of_study)
+phs.aim2.data$daysto_cvd_dt = as.Date(phs.aim2.data$daysto_cvd_dt)
+phs.aim2.data$enr_end = as.Date(phs.aim2.data$enr_end)
+phs.aim2.data$index_date = as.Date(phs.aim2.data$index_date)
+
+phs.aim2.data$eofdate = pmin(phs.aim2.data$death_date, phs.aim2.data$end_of_study, phs.aim2.data$daysto_cvd_dt, phs.aim2.data$enr_end, na.rm = T)
+
+table(phs.aim2.data$eofdate < phs.aim2.data$index_date)
+
+phs.aim2.data$eofdate[phs.aim2.data$eofdate < phs.aim2.data$index_date] = phs.aim2.data$index_date[phs.aim2.data$eofdate < phs.aim2.data$index_date]
+
+# Create eoftype variable
+phs.aim2.data$ischemic_heart_disease_event = cvd$ischemic_heart_disease[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$heart_failure_event = cvd$heart_failure[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$cardiomyopathy_event = cvd$cardiomyopathy[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$stroke_event = cvd$stroke[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$tia_event = cvd$tia[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$valvular_disease_event = cvd$valvular_disease[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$myocarditis_pericarditis_event = cvd$myocarditis_pericarditis[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$carotid_disease_event = cvd$carotid_disease[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$cardiac_arrest_event = cvd$cardiac_arrest[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$arrhythmia_event = cvd$arrhythmia[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+phs.aim2.data$vte_event = cvd$vte[match(phs.aim2.data$cvd_studyid, cvd$cvd_studyid)]
+
+
+phs.aim2.data$eoftype = NA
+phs.aim2.data$eoftype[!is.na(phs.aim2.data$death_date)] = "Death"
+phs.aim2.data$eoftype[phs.aim2.data$eofdate == "2018-12-31"] = "End of Study"
+phs.aim2.data$eoftype[phs.aim2.data$ischemic_heart_disease_event == 1] = "Ischemic Heart Disease"
+phs.aim2.data$eoftype[phs.aim2.data$heart_failure_event == 1 | phs.aim2.data$cardiomyopathy_event == 1] = "Heart Failure/Cardiomyopathy"
+#phs.aim2.data$eoftype[phs.aim2.data$cardiomyopathy_event == 1] = "Cardiomyopathy"
+phs.aim2.data$eoftype[phs.aim2.data$stroke_event == 1] = "Stroke"
+phs.aim2.data$eoftype[phs.aim2.data$arrhythmia_event == 1] = "Arrhythmia"
+phs.aim2.data$eoftype[phs.aim2.data$cardiac_arrest_event == 1] = "Cardiac Arrest"
+phs.aim2.data$eoftype[phs.aim2.data$carotid_disease_event == 1] = "Carotid Disease"
+phs.aim2.data$eoftype[phs.aim2.data$myocarditis_pericarditis_event == 1] = "Myocarditis Pericarditis"
+phs.aim2.data$eoftype[phs.aim2.data$tia_event == 1] = "TIA"
+phs.aim2.data$eoftype[phs.aim2.data$valvular_disease_event == 1] = "Valvular Disease"
+phs.aim2.data$eoftype[phs.aim2.data$vte_event == 1] = "VTE"
+phs.aim2.data$eoftype[is.na(phs.aim2.data$eoftype)] = "Disenrollment"
+
+table(phs.aim2.data$eoftype)
+
+
+```
+
+
+
